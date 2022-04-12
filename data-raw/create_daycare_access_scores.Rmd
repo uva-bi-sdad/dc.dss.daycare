@@ -1,0 +1,281 @@
+---
+title: "Daycare catchment scores"
+author: "Joanna Schroeder"
+date: "3/4/2022"
+output: html_document
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.height = 5,
+  fig.width = 8.84,
+  dev = "CairoSVG",
+  fig.ext = "svg"
+)
+maindir <- "~/git/dc.dss.daycare/data-raw/"
+oridir <- paste0(maindir, "original/")
+dir.create(oridir, FALSE, TRUE)
+library(sf)
+library(rmapshaper)
+library(Matrix)
+library(leaflet)
+library(catchment)
+library(tidyverse)
+library(community)
+```
+
+
+# Data Collection
+
+* Consumers: Total population under 15 years old of Census block groups.
+* Providers: Capacity of daycares
+
+## Consumers
+
+```{r}
+library(catchment)
+
+data <- list()
+shapes <- list()
+
+# download / load
+for(state in c("va")){
+  # shapes
+  counties <- download_census_shapes(oridir, state, "county", paste0(state, "_counties"))
+  tracts <- download_census_shapes(oridir, state, "tract", paste0(state, "_tracts"))
+  blockgroups <- download_census_shapes(oridir, state, "bg", paste0(state, "_blockgroups"))
+  
+  ## store subsets to combine later
+  counties[counties$NAME == "Fairfax", "NAME"] <- c("Fairfax City", "Fairfax")
+  shapes[[state]] <- list(
+    counties = counties,
+    tracts = tracts[substr(tracts$GEOID, 1, 5) %in% counties$GEOID,],
+    blockgroups = blockgroups[substr(blockgroups$GEOID, 1, 5) %in% counties$GEOID,]
+  )
+  
+  # population data
+  data[[state]] <- download_census_population(
+    oridir, state, 2019, include_margins = TRUE, include_commutes = TRUE,
+    counties = counties$GEOID, verbose = TRUE
+  )
+}
+
+## create and save combined shapes
+library(sf)
+library(rmapshaper)
+
+## create and save square commutes matrix
+library(Matrix)
+commutes <- sparseMatrix(
+  {}, {}, x = 0,
+  dims = rowSums(vapply(data, function(d) dim(d$commutes), numeric(2))),
+  dimnames = rep(list(do.call(c, unname(lapply(data, function(d) colnames(d$commutes))))), 2)
+)
+for(d in data) commutes[rownames(d$commutes), colnames(d$commutes)] <- d$commutes
+write.csv(
+  cbind(GEOID = rownames(commutes), as.data.frame(as.matrix(unname(commutes)))),
+  paste0(maindir, "commutes.csv"), row.names = FALSE
+)
+system2("bzip2", shQuote(paste0("data-raw/commutes.csv")))
+
+## create and save combined population data file
+data_combined <- do.call(rbind, lapply(names(data), function(state){
+  d <- data[[state]]$estimates
+  s <- shapes[[state]]$blockgroups
+  rownames(s) <- s$GEOID
+  total <- d$TOTAL.POPULATION_Total
+  total[total == 0] <- 1
+  data.frame(
+    GEOID = d$GEOID,
+    population = d$TOTAL.POPULATION_Total,
+    percent_female = d$SEX.BY.AGE_Female_Female / total * 100,
+    percent_white = d$RACE_Total_White.alone / total * 100,
+    population_under_15 = rowSums(d[, c(4:6, 28:30)]),
+    st_coordinates(st_centroid(st_geometry(s[as.character(d$GEOID),])))
+  )
+}))
+write.csv(data_combined, paste0(maindir, "data.csv"), row.names = FALSE)
+```
+
+## Providers
+
+```{r}
+providers <- read.csv("/project/biocomplexity/sdad/projects_data/mc/data_commons/dc_education_training/daycare_lonlat.csv") %>% rename(lat = latitude, long = longitude)
+
+# get the ZIP codes within the focal counties
+county_shapes <- read_sf("/home/js2mr/git/dc.dss.daycare/data-raw/original/va_counties.geojson", as_tibble = FALSE)
+geography_ref <- read.csv(
+  "https://www2.census.gov/geo/docs/maps-data/data/rel/zcta_county_rel_10.txt"
+)
+
+#zips <- #unique(unlist(lapply(names(dmv_counties), function(state){
+#GEOIDs <- county_shapes$GEOID
+#  formatC(geography_ref[geography_ref$GEOID %in% GEOIDs, "ZCTA5"], width = 5, flag = 0)
+#  zips <- GEOIDs
+#}), use.names = FALSE))
+
+providers <- providers %>% select(-X) %>% rename(Y = lat, X = long) 
+
+
+# add coordinates to providers data
+#providers[, c("Y", "X")] <- address_coords[providers$address, c("lat", "long")]
+providers <- providers[!is.na(providers$X),]
+providers$locid <- paste0(providers$X, ",", providers$Y)
+#providers <- split(providers, seq(nrow(providers)))
+
+provider_locations <- do.call(rbind, lapply(unique(providers$locid), function(l){
+  d <- providers[providers$locid == l, vars]
+  d[d == ""] <- NA
+  as.data.frame(list(
+    address = d[1, "address"],
+    X = d[1, "X"],
+    Y = d[1, "Y"],
+    daycares = "capacity",
+    as.list(colMeans(matrix(
+      as.numeric(as.matrix(d[,])), nrow(d),
+      dimnames = list(NULL, vars[])
+    ), na.rm = TRUE))
+  ))
+}))
+provider_locations[is.na(provider_locations)] <- NA
+
+# identify zip codes that cross counties
+zip_cross <- substr(unique(do.call(paste0,
+  geography_ref[geography_ref$ZCTA5 %in% zips, c("ZCTA5", "GEOID")]
+)), 1, 5)
+zip_cross <- zip_cross[duplicated(zip_cross)]
+
+# make unique IDs for each provider location
+provider_locations$ID <- paste0("l", seq_len(nrow(provider_locations)))
+
+# save provider locations dataset
+write.csv(provider_locations, paste0(maindir, "providers.csv"), row.names = FALSE)
+```
+
+## Travel Times
+
+```{r}
+library(osrm)
+options(osrm.server = Sys.getenv("OSRM_SERVER"))
+traveltimes <- osrmTable(
+  src = data_combined[, c("GEOID", "X", "Y")],
+  dst = provider_locations[, c("ID", "X", "Y")]
+)$duration
+write.csv(
+  cbind(GEOID = rownames(traveltimes), as.data.frame(as.matrix(traveltimes))),
+  paste0("data-raw/traveltimes.csv"), row.names = FALSE
+)
+system2("bzip2", shQuote(paste0("data-raw/traveltimes.csv")))
+```
+
+# Calculating Floating Catchment Areas {#calculations}
+
+```{r}
+library(sf)
+library(Matrix)
+
+# load files
+data_combined = read.csv("data-raw/data.csv")
+blockgroup_shapes = read_json("data-raw/originial/va_blockgroups.geojson")
+commutes <- as(as.matrix(read.csv(bzfile("data-raw/commutes.csv.bz2"), row.names = 1)), "dgCMatrix")
+provider_locations = read.csv("data-raw/providers.csv")
+traveltimes <- as(as.matrix(read.csv(bzfile("data-raw/traveltimes.csv.bz2"), row.names = 1)), "dgCMatrix")
+```
+
+## 2-Step Floating Catchment Area
+
+We can start with the most basic form of a floating catchment area ratio, the 2-step floating catchment
+area [2SFCA\; @luo03], which has binary weights in a set range:
+```{r}
+library(catchment)
+
+data_combined$daycares_2sfca <- catchment_ratio(
+  # this specifies consumers, providers, costs, and weights
+  data_combined, provider_locations, traveltimes, 60,
+  # this specifies where to find ids and values in the entered consumers and providers objects
+  consumers_value = "population_under_15", providers_id = "ID", providers_value = "capacity",
+  verbose = TRUE
+)
+```
+
+These results may look odd in some cases, where some regions have several doctors on top of them
+but have lower ratios than surrounding regions without doctors. In most cases, this is simply because
+doctors are being distributed across all regions in range, and in this case, that distribution is uniform
+over distances. Of course, it could also be the case that travel is particularly difficult in a region,
+making everything effectively more distant, or an issue with the routing engine may make it appear
+that way.
+
+## 2-Step Floating Catchment Area with Euclidean Distances
+
+The other variants of the 2- and 3-step floating catchment area all come down to differences in weight
+schemes, but before looking at those, we might compare differences in cost, between the travel times we
+pre-calculated, with simpler Euclidean distances:
+```{r}
+data_combined$daycares_2sfca_euclidean <- catchment_ratio(
+  # to get Euclidean distances between coordinates, we can just leave cost unspecified
+  # but since these are on a difference scale, we will need to set a different weight cutoff
+  data_combined, provider_locations,
+  weight = .54,
+  consumers_value = "population", providers_id = "ID", providers_value = "doctors",
+  # if the coordinate columns were not the default (X = Longitude, Y = Latitude),
+  # you could specify them here, such as with providers_location = c("long", "lat")
+  verbose = TRUE, return_type = 1000
+)
+```
+
+## Enhanced 2-Step Floating Catchment Area
+
+```{r}
+step_weights <- list(c(60, .042), c(30, .377), c(20, .704), c(10, .962))
+data_combined$daycares_e2sfca <- catchment_ratio(
+  data_combined, provider_locations, traveltimes, step_weights,
+  consumers_value = "population_under_15", providers_id = "ID", providers_value = "capacity",
+  verbose = TRUE, return_type = 1000
+)
+```
+
+Between the binary and step-weighted variants, there is generally some redistribution away
+from larger, more distant regions (in red) toward smaller regions nearer to cluster of
+doctors (in blue), though this seems to mostly happen in the D.C. area, and is nearly
+the reverse in northern Maryland regions.
+
+## Kernel Density 2-Step Floating Catchment Area
+
+Another enhanced 2-step floating catchment area can use continuous weights, rather than binned steps,
+which is sometimes called a kernel density 2-step floating catchment area [KD2SFCA\; @dai10].
+Here, we will apply a Gaussian decay function within catchment areas, then compare with the
+step-weighted scores:
+```{r}
+data_combined$daycares_kd2sfca <- catchment_ratio(
+  data_combined, provider_locations, traveltimes, "gaussian", scale = 19,
+  consumers_value = "population_under_15", providers_id = "ID", providers_value = "capacity",
+  verbose = TRUE, return_type = 1000
+)
+```
+
+## 3-Step Floating Catchment Area
+
+```{r}
+data_combined$daycares_3sfca <- catchment_ratio(
+  data_combined, provider_locations, traveltimes, step_weights,
+  normalize_weight = TRUE,
+  consumers_value = "population_under_15", providers_id = "ID", providers_value = "capacity",
+  verbose = TRUE, return_type = 1000
+)
+```
+
+## Commuter-Based 3-Step Floating Catchment Area
+
+```{r}
+data_combined$daycares_cb3sfca <- catchment_ratio(
+  data_combined, provider_locations, traveltimes, step_weights,
+  normalize_weight = TRUE,
+  consumers_value = "population_under_15", providers_id = "ID", providers_value = "capacity",
+  consumers_commutes = commutes, return_type = 1000
+)
+
+write.csv(data_combined, "va_bg_dss_2021_daycare_access_scores.csv")
+```
+
