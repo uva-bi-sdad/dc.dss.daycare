@@ -24,6 +24,25 @@ library(leaflet)
 library(catchment)
 library(tidyverse)
 library(community)
+
+get_db_conn <-
+  function(db_name = Sys.getenv("db_nam"),
+           db_host = Sys.getenv("db_hst"),
+           db_port = Sys.getenv("db_prt"),
+           db_user = Sys.getenv("db_usr"),
+           db_pass = Sys.getenv("db_pwd")) {
+    RPostgreSQL::dbConnect(
+      drv = RPostgreSQL::PostgreSQL(),
+      dbname = db_name,
+      host = db_host,
+      port = db_port,
+      user = db_user,
+      password = db_pass
+    )
+  }
+con <- get_db_conn()
+geo_names <- DBI::dbGetQuery(con, "SELECT * FROM dc_geographies.va_hd_vdh_2021_health_district_geo_names")
+DBI::dbDisconnect(con)
 ```
 
 
@@ -92,18 +111,19 @@ data_combined <- do.call(rbind, lapply(names(data), function(state){
     population = d$TOTAL.POPULATION_Total,
     percent_female = d$SEX.BY.AGE_Female_Female / total * 100,
     percent_white = d$RACE_Total_White.alone / total * 100,
-    population_under_15 = rowSums(d[, c(4:6, 28:30)]),
-    st_coordinates(st_centroid(st_geometry(s[as.character(d$GEOID),])))
-  )
-}))
+    population_under_15 = rowSums(d[, c(4:6, 28:30)])
+  )}))
+
+all_geos <- blockgroups %>% select(GEOID, TRACTCE, COUNTYFP) %>% st_drop_geometry()
+all_geos$GEOID <- as.numeric(all_geos$GEOID)
+data_combined_geos <- data_combined %>% left_join(all_geos, by = "GEOID")
 write.csv(data_combined, paste0(maindir, "data.csv"), row.names = FALSE)
+write.csv(data_combined_geos, paste0(maindir, "data_combined_geos.csv"), row.names = FALSE)
 ```
 
 ## Providers
 
 ```{r}
-providers <- read.csv("/project/biocomplexity/sdad/projects_data/mc/data_commons/dc_education_training/daycare_lonlat.csv") %>% rename(lat = latitude, long = longitude)
-
 # get the ZIP codes within the focal counties
 county_shapes <- read_sf("/home/js2mr/git/dc.dss.daycare/data-raw/original/va_counties.geojson", as_tibble = FALSE)
 geography_ref <- read.csv(
@@ -115,8 +135,8 @@ geography_ref <- read.csv(
 #  formatC(geography_ref[geography_ref$GEOID %in% GEOIDs, "ZCTA5"], width = 5, flag = 0)
 #  zips <- GEOIDs
 #}), use.names = FALSE))
-
-providers <- providers %>% select(-X) %>% rename(Y = lat, X = long) 
+providers <- read.csv("/project/biocomplexity/sdad/projects_data/mc/data_commons/dc_education_training/daycare_lonlat.csv") %>% select(-X) %>% rename(X = latitude, Y = longitude)
+#providers <- providers %>% select(-X) %>% rename(Y = lat, X = long) 
 
 
 # add coordinates to providers data
@@ -124,28 +144,28 @@ providers <- providers %>% select(-X) %>% rename(Y = lat, X = long)
 providers <- providers[!is.na(providers$X),]
 providers$locid <- paste0(providers$X, ",", providers$Y)
 #providers <- split(providers, seq(nrow(providers)))
-
-provider_locations <- do.call(rbind, lapply(unique(providers$locid), function(l){
-  d <- providers[providers$locid == l, vars]
-  d[d == ""] <- NA
-  as.data.frame(list(
-    address = d[1, "address"],
-    X = d[1, "X"],
-    Y = d[1, "Y"],
-    daycares = "capacity",
-    as.list(colMeans(matrix(
-      as.numeric(as.matrix(d[,])), nrow(d),
-      dimnames = list(NULL, vars[])
-    ), na.rm = TRUE))
-  ))
-}))
+provider_locations <- providers %>% select(locid, address, X, Y, capacity)
+#provider_locations <- do.call(rbind, lapply(unique(providers$locid), function(l){
+#  d <- providers[providers$locid == l, vars]
+#  d[d == ""] <- NA
+#  as.data.frame(list(
+#    address = d[1, "address"],
+#    X = d[1, "X"],
+#    Y = d[1, "Y"],
+#    daycares = "capacity",
+#    as.list(colMeans(matrix(
+#      as.numeric(as.matrix(d[])), nrow(d),
+#      dimnames = list(NULL, vars[])
+#    ), na.rm = TRUE))
+#  ))
+#}))
 provider_locations[is.na(provider_locations)] <- NA
 
 # identify zip codes that cross counties
-zip_cross <- substr(unique(do.call(paste0,
-  geography_ref[geography_ref$ZCTA5 %in% zips, c("ZCTA5", "GEOID")]
-)), 1, 5)
-zip_cross <- zip_cross[duplicated(zip_cross)]
+#zip_cross <- substr(unique(do.call(paste0,
+#  geography_ref[geography_ref$ZCTA5 %in% zips, c("ZCTA5", "GEOID")]
+#)), 1, 5)
+#zip_cross <- zip_cross[duplicated(zip_cross)]
 
 # make unique IDs for each provider location
 provider_locations$ID <- paste0("l", seq_len(nrow(provider_locations)))
@@ -170,112 +190,100 @@ write.csv(
 system2("bzip2", shQuote(paste0("data-raw/traveltimes.csv")))
 ```
 
-# Calculating Floating Catchment Areas {#calculations}
+# Calculating Floating Catchment Areas
 
 ```{r}
 library(sf)
 library(Matrix)
+library(jsonlite)
 
 # load files
-data_combined = read.csv("data-raw/data.csv")
-blockgroup_shapes = read_json("data-raw/originial/va_blockgroups.geojson")
-commutes <- as(as.matrix(read.csv(bzfile("data-raw/commutes.csv.bz2"), row.names = 1)), "dgCMatrix")
-provider_locations = read.csv("data-raw/providers.csv")
-traveltimes <- as(as.matrix(read.csv(bzfile("data-raw/traveltimes.csv.bz2"), row.names = 1)), "dgCMatrix")
+data_combined = read.csv("~/git/dc.dss.daycare/data-raw/data.csv")
+data_combined_geos = read_csv("~/git/dc.dss.daycare/data-raw/data_combined_geos.csv")
+blockgroup_shapes = read_json("~/git/dc.dss.daycare/data-raw/original/va_blockgroups.geojson")
+commutes <- as(as.matrix(read.csv(bzfile("~/git/dc.dss.daycare/data-raw/commutes.csv.bz2"), row.names = 1)), "dgCMatrix")
+provider_locations = read_csv("~/git/dc.dss.daycare/data-raw/providers.csv")
+traveltimes <- as(as.matrix(read.csv(bzfile("~/git/dc.dss.daycare/data-raw/traveltimes.csv.bz2"), row.names = 1)), "dgCMatrix")
+
+#providers <- read.csv("/project/biocomplexity/sdad/projects_data/mc/data_commons/dc_education_training/daycare_lonlat.csv") %>% rename(lat = latitude, long = longitude) %>% select(address, capacity)
+# changing capacity column to daycare capacity not "capacity" ** FIX
+#providers_locations <- provider_locations %>% select(-daycares) %>% right_join(providers, by = "address") %>% select(-address.1, -X.1, -Y.1) %>% dplyr::rename(daycares = capacity)
+
+
 ```
 
-## 2-Step Floating Catchment Area
+## Calculations
 
-We can start with the most basic form of a floating catchment area ratio, the 2-step floating catchment
-area [2SFCA\; @luo03], which has binary weights in a set range:
 ```{r}
 library(catchment)
+# Calculating measures: 3scfa, capacity, and avg travel time to 5 closest daycares
 
-data_combined$daycares_2sfca <- catchment_ratio(
+# capacity (# seats/geography)
+
+providers_locations <- provider_locations %>% filter(!(is.na(X) | is.na(Y)))
+providers_sf <- st_as_sf(providers_locations, coords = c("X", "Y"), crs = 4269)
+intersect <- st_intersection(providers_sf, blockgroups)
+capacity <- intersect %>% group_by(GEOID) %>% mutate(total_seats = sum(daycares, na.rm = TRUE)) %>% distinct(GEOID, total_seats)
+seats$GEOID <- as.numeric(seats$GEOID)
+capacity_all <- data_combined_geos %>% left_join(aggregate_hd, by = "GEOID") %>% left_join(seats, by = "GEOID") %>% mutate(total_seats_bg = ifelse(is.na(total_seats), 0, total_seats)) %>% group_by(TRACTCE) %>% mutate(total_seats_tr = sum(total_seats_bg)) %>% group_by(COUNTYFP) %>% mutate(total_seats_ct = sum(total_seats_bg)) %>% group_by(hd_id) %>% mutate(total_seats_hd = sum(total_seats_bg), measure = "daycare_cnt")
+
+
+# 3sfa for block groups
+data_combined$daycare_3sfca <- catchment_ratio(
   # this specifies consumers, providers, costs, and weights
-  data_combined, provider_locations, traveltimes, 60,
+  data_combined, provider_locations, traveltimes, weight = "gaussian", 
   # this specifies where to find ids and values in the entered consumers and providers objects
-  consumers_value = "population_under_15", providers_id = "ID", providers_value = "capacity",
-  verbose = TRUE
-)
-```
-
-These results may look odd in some cases, where some regions have several doctors on top of them
-but have lower ratios than surrounding regions without doctors. In most cases, this is simply because
-doctors are being distributed across all regions in range, and in this case, that distribution is uniform
-over distances. Of course, it could also be the case that travel is particularly difficult in a region,
-making everything effectively more distant, or an issue with the routing engine may make it appear
-that way.
-
-## 2-Step Floating Catchment Area with Euclidean Distances
-
-The other variants of the 2- and 3-step floating catchment area all come down to differences in weight
-schemes, but before looking at those, we might compare differences in cost, between the travel times we
-pre-calculated, with simpler Euclidean distances:
-```{r}
-data_combined$daycares_2sfca_euclidean <- catchment_ratio(
-  # to get Euclidean distances between coordinates, we can just leave cost unspecified
-  # but since these are on a difference scale, we will need to set a different weight cutoff
-  data_combined, provider_locations,
-  weight = .54,
-  consumers_value = "population", providers_id = "ID", providers_value = "doctors",
-  # if the coordinate columns were not the default (X = Longitude, Y = Latitude),
-  # you could specify them here, such as with providers_location = c("long", "lat")
-  verbose = TRUE, return_type = 1000
-)
-```
-
-## Enhanced 2-Step Floating Catchment Area
-
-```{r}
-step_weights <- list(c(60, .042), c(30, .377), c(20, .704), c(10, .962))
-data_combined$daycares_e2sfca <- catchment_ratio(
-  data_combined, provider_locations, traveltimes, step_weights,
-  consumers_value = "population_under_15", providers_id = "ID", providers_value = "capacity",
-  verbose = TRUE, return_type = 1000
-)
-```
-
-Between the binary and step-weighted variants, there is generally some redistribution away
-from larger, more distant regions (in red) toward smaller regions nearer to cluster of
-doctors (in blue), though this seems to mostly happen in the D.C. area, and is nearly
-the reverse in northern Maryland regions.
-
-## Kernel Density 2-Step Floating Catchment Area
-
-Another enhanced 2-step floating catchment area can use continuous weights, rather than binned steps,
-which is sometimes called a kernel density 2-step floating catchment area [KD2SFCA\; @dai10].
-Here, we will apply a Gaussian decay function within catchment areas, then compare with the
-step-weighted scores:
-```{r}
-data_combined$daycares_kd2sfca <- catchment_ratio(
-  data_combined, provider_locations, traveltimes, "gaussian", scale = 19,
-  consumers_value = "population_under_15", providers_id = "ID", providers_value = "capacity",
-  verbose = TRUE, return_type = 1000
-)
-```
-
-## 3-Step Floating Catchment Area
-
-```{r}
-data_combined$daycares_3sfca <- catchment_ratio(
-  data_combined, provider_locations, traveltimes, step_weights,
-  normalize_weight = TRUE,
-  consumers_value = "population_under_15", providers_id = "ID", providers_value = "capacity",
-  verbose = TRUE, return_type = 1000
-)
-```
-
-## Commuter-Based 3-Step Floating Catchment Area
-
-```{r}
-data_combined$daycares_cb3sfca <- catchment_ratio(
-  data_combined, provider_locations, traveltimes, step_weights,
-  normalize_weight = TRUE,
-  consumers_value = "population_under_15", providers_id = "ID", providers_value = "capacity",
-  consumers_commutes = commutes, return_type = 1000
+  consumers_value = "population_under_15", providers_id = "ID", providers_value = "daycares",
+  scale = 18, normalize_weight = TRUE, return_type = 1000, verbose = TRUE
 )
 
-write.csv(data_combined, "va_bg_dss_2021_daycare_access_scores.csv")
+# 3sfca for tracts
+aggregate_tr <- data_combined_geos %>% group_by(TRACTCE) %>% mutate(population_under_15 = sum(population_under_15)) %>% ungroup() %>% mutate(GEOID = paste0("51", COUNTYFP, TRACTCE)) %>% distinct(GEOID, population_under_15) 
+aggregate_tr$value <- catchment_aggregate(data_combined, aggregate_tr, 
+                    id = "GEOID", value = "daycare_3sfca", consumers = "population_under_15", to_id = "GEOID",
+                    verbose = TRUE)
+
+# 3sfca for counties
+aggregate_ct <- data_combined_geos %>% group_by(COUNTYFP) %>% mutate(population_under_15 = sum(population_under_15)) %>% ungroup() %>% mutate(GEOID = paste0("51", COUNTYFP)) %>% distinct(GEOID, population_under_15)
+aggregate_ct$value <- catchment_aggregate(data_combined, aggregate_ct, 
+                    id = "GEOID", value = "daycare_3sfca", consumers = "population_under_15", to_id = "GEOID",
+                    verbose = TRUE)
+
+# 3sfca for health districts
+aggregate_hd <- read.csv("/project/biocomplexity/sdad/projects_data/vdh/va_county_to_hd.csv")
+aggregate_hd <- aggregate_hd %>% left_join(geo_names, by = c("health_district" = "region_name")) %>% select(COUNTYFP = county_id, geoid) %>% rename(hd_id = geoid)
+aggregate_hd$COUNTYFP <- as.character(aggregate_hd$COUNTYFP)
+aggregate_hd <- data_combined_geos %>% mutate(COUNTYFP = paste0("51", COUNTYFP)) %>% left_join(aggregate_hd, by = "COUNTYFP") %>% group_by(hd_id) %>% mutate(population_under_15 = sum(population_under_15)) %>% select(GEOID, hd_id, population_under_15)
+map <- as.list(aggregate_hd$GEOID)
+names(map) <- aggregate_hd$hd_id
+aggregate_hd$value <- catchment_aggregate(data_combined, aggregate_hd, 
+                    id = "GEOID", value = "daycare_3sfca", consumers = "population_under_15", to_id = "hd_id",
+                    map = map, verbose = TRUE)
+
+
+
+# avg travel time (from Hanna) ** need to figure out how we are aggregating these
+# find the 5 largest values
+list_5_top <- apply(traveltimes, 1, function(x) sort(x, decreasing = F)[1:5])
+# mean and median value
+mean_low_five <- apply(list_5_top, 2, function(x) (mean(x)))
+median_low_five <- apply(list_5_top, 2, function(x) (median(x)))
+out_df <- data.frame(geoid=names(mean_low_five), mean_drive_time_top5=mean_low_five, row.names=NULL)
+med_df <- data.frame(geoid=names(median_low_five), median_drive_time_top5=median_low_five, row.names=NULL)
+out_df <- left_join(out_df, med_df, by="geoid") %>% mutate(measure = "daycare_median_drive_time_top5")
+
+cnt_bg <- capacity_all %>% ungroup() %>% select(geoid = GEOID, value = total_seats_bg, measure) %>% mutate(region_type = "block group")
+cnt_tr <- capacity_all %>% ungroup() %>% select(geoid = GEOID, value = total_seats_tr, measure) %>% mutate(region_type = "tract")
+cnt_ct <- capacity_all %>% ungroup() %>% select(geoid = GEOID, value = total_seats_ct, measure) %>% mutate(region_type = "county")
+cnt_hd <- capacity_all %>% ungroup() %>% select(geoid = GEOID, value = total_seats_hd, measure) %>% mutate(region_type = "health district")
+ca_bg <- data_combined %>% ungroup() %>% select(geoid = GEOID, value = daycare_3sfca) %>% mutate(measure = "daycare_3sfca") %>% mutate(region_type = "block group")
+ca_tr <- aggregate_tr %>% select(geoid = GEOID, value) %>% mutate(measure = "daycare_3sfca") %>% mutate(region_type = "tract")
+ca_ct <- aggregate_ct %>% select(geoid = GEOID, value) %>% mutate(measure = "daycare_3sfca") %>% mutate(region_type = "county")
+ca_hd <- aggregate_hd %>% ungroup() %>% select(geoid = GEOID, value) %>% mutate(measure = "daycare_3sfca") %>% mutate(region_type = "health district")
+dt_bg <- out_df %>% select(geoid, value = median_drive_time_top5) %>% mutate(measure = "daycare_median_drive_time_top5", region_type = "block group")
+
+va_hdcttrbg_dss_2021_daycare_access_scores <- cnt_bg %>% rbind(cnt_tr) %>% rbind(cnt_ct) %>% rbind(cnt_hd) %>% rbind(ca_bg) %>% rbind(ca_tr) %>% rbind(ca_ct) %>% rbind(ca_hd) %>% rbind(dt_bg)
+write.csv(va_hdcttrbg_dss_2021_daycare_access_scores, "~/git/dc.dss.daycare/data/va_hdcttrbg_dss_2021_daycare_access_scores.csv")
+
 ```
 
