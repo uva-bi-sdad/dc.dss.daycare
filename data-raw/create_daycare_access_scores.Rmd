@@ -239,11 +239,12 @@ library(Matrix)
 library(jsonlite)
 
 # load files
-data_combined = read.csv("~/git/dc.dss.daycare/data-raw/data.csv")
-data_combined_geos = read_csv("~/git/dc.dss.daycare/data-raw/data_combined_geos.csv")
+data_combined = read.csv("~/git/dc.dss.daycare/data-raw/data.csv.bz2")
+data_combined_geos = read.csv("~/git/dc.dss.daycare/data-raw/data_combined_geos.csv.bz2")
 blockgroup_shapes = read_json("~/git/dc.dss.daycare/data-raw/original/va_blockgroups.geojson")
+blockgroups <- read_sf("/home/js2mr/git/dc.dss.daycare/data-raw/original/va_blockgroups.geojson", as_tibble = FALSE)
 commutes <- as(as.matrix(read.csv(bzfile("~/git/dc.dss.daycare/data-raw/commutes.csv.bz2"), row.names = 1)), "dgCMatrix")
-provider_locations = read_csv("~/git/dc.dss.daycare/data-raw/providers.csv")
+provider_locations = read.csv("~/git/dc.dss.daycare/data-raw/providers.csv.bz2")
 traveltimes <- as(as.matrix(read.csv(bzfile("~/git/dc.dss.daycare/data-raw/traveltimes.csv.bz2"), row.names = 1)), "dgCMatrix")
 traveltimes_all <- as(as.matrix(read.csv(bzfile("~/git/dc.dss.daycare/data-raw/traveltimes_all.csv.bz2"), row.names = 1)), "dgCMatrix")
 #capacity <- read.csv("~/git/dc.dss.daycare/data-raw/capacity.csv")
@@ -260,6 +261,7 @@ traveltimes_all <- as(as.matrix(read.csv(bzfile("~/git/dc.dss.daycare/data-raw/t
 
 ```{r}
 library(catchment)
+library(tidyverse)
 # Calculating measures: 3scfa, capacity, and avg travel time to 5 closest daycares
 
 # capacity (# seats/geography)
@@ -326,11 +328,18 @@ ca_bg <- data_combined %>% ungroup() %>% distinct(geoid = GEOID, value = daycare
 ca_tr <- aggregate_tr %>% distinct(geoid = GEOID, value) %>% mutate(measure = "daycare_3sfca", measure_type = "index") %>% mutate(region_type = "tract")
 ca_ct <- aggregate_ct %>% distinct(geoid = GEOID, value) %>% mutate(measure = "daycare_3sfca", measure_type = "index") %>% mutate(region_type = "county")
 ca_hd <- aggregate_hd %>% ungroup() %>% distinct(geoid = hd_id, value) %>% mutate(measure = "daycare_3sfca", measure_type = "index") %>% mutate(region_type = "health district")
-dt_bg <- out_df %>% select(geoid, value = median_drive_time_top5) %>% mutate(measure = "daycare_median_drive_time_top5", region_type = "block group", measure_type = "drive time")
+#dt_bg <- out_df %>% select(geoid, value = median_drive_time_top5) %>% mutate(measure = "daycare_median_drive_time_top5", region_type = "block group", measure_type = "drive time")
 
 va_hdcttrbg_dss_2021_daycare_access_scores <- cnt_bg %>% rbind(cnt_tr) %>% rbind(cnt_ct) %>% rbind(cnt_hd) %>% rbind(ca_bg) %>% rbind(ca_tr) %>% rbind(ca_ct) %>% rbind(ca_hd) %>% rbind(dt_bg) %>% mutate(year = 2021) %>% left_join(region_names, by = "geoid") %>% select(geoid, region_type, region_name, year, measure, value, measure_type)
 write.csv(va_hdcttrbg_dss_2021_daycare_access_scores, "~/git/dc.dss.daycare/data/va_hdcttrbg_dss_2021_daycare_access_scores.csv")
-vdh <- va_hdcttrbg_dss_2021_daycare_access_scores %>% filter(region_type != "block group")
-write.csv(vdh, "~/git/dc.dss.daycare/data/va_hdcttr_dss_2021_daycare_access_scores.csv")
+#vdh <- va_hdcttrbg_dss_2021_daycare_access_scores %>% filter(region_type != "block group")
+#write.csv(vdh, "~/git/dc.dss.daycare/data/va_hdcttr_dss_2021_daycare_access_scores.csv")
+
+system2("bzip2", shQuote("/home/js2mr/git/dc.dss.daycare/data-raw/data.csv"))
+system2("bzip2", shQuote("/home/js2mr/git/dc.dss.daycare/data-raw/data_combined_geos.csv"))
+system2("bzip2", shQuote("/home/js2mr/git/dc.dss.daycare/data-raw/providers.csv"))
+system2("bzip2", shQuote("/home/js2mr/git/dc.dss.daycare/data/va_hdcttrbg_dss_2021_daycare_access_scores.csv"))
+
+
 ```
 
