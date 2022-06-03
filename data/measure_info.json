@@ -10,6 +10,7 @@
     "short_description": "Count of day care capacity (seats) based on provider locations",
     "long_description": "Count of day care capacity (seats) based on provider locations. Address and capacity data were collected from Virginia Department of Social Services day care search tool.",
     "statement": "There are {value} daycare seats in {features.name}.",
+    "equity_category": "Availability",
     "sources": [
       {
         "name": "Virginia Department of Social Services",
@@ -24,11 +25,12 @@
     "full_name": "daycare_access_scores:daycare_3sfca",
     "measure": "daycare_3sfca",
     "type": "index",
-    "short_name": "Day care access score",
-    "long_name": "Day care access score (3-step floating catchment area)",
-    "short_description": "Index of day care accessibility based on supply of and demand for providers",
-    "long_description": "Day care access score based on 3-step floating catchment areas. This method is an aggregation of day care facilities per population ratios weighted by distance or travel time in each catchment area (area within which a provider is accessible). Provider address data were collected from Virginia Department of Social Services day care search tool. The demand for day care services is the population 0-15 years old and the supply is the capacity of day cares (number of seats).",
-    "statement": "The daycare accessibility score for {features.name} is {value}.",
+    "short_name": "Day care geographic availability",
+    "long_name": "Day care geographic availability (3-step floating catchment area)",
+    "short_description": "Index of day care availability based on supply of and demand for providers",
+    "long_description": "Day care availability based on 3-step floating catchment areas. This method is an aggregation of day care facilities per population ratios weighted by distance or travel time in each catchment area (area within which a provider is accessible). Provider address data were collected from Virginia Department of Social Services day care search tool. The demand for day care services is the population 0-15 years old and the supply is the capacity of day cares (number of seats).",
+    "statement": "The daycare availability for {features.name} is {value}.",
+    "equity_category": "Availability",
     "citations": [
       "lou04",
       "lou09",
@@ -49,11 +51,12 @@
     "full_name": "daycare_access_scores:daycare_median_drive_time_top5",
     "measure": "median_drive_time_top5",
     "type": "drive time",
-    "short_name": "Day care access (drive time)",
-    "long_name": "Day care access by median drive time to the five closest day cares in minutes",
+    "short_name": "Day care availability (drive time)",
+    "long_name": "Day care availability by median drive time to the five closest day cares in minutes",
     "short_description": "Median drive time (minutes) to the five closest day cares from centroid of selected region",
     "long_description": "Median drive time in minutes to the five closest day cares from centroid of selected region. Address data were collected from the Virginia Department of Social Services Child Day Care Facility search (Dataset for year 2019). Drive times were computed using Open Source Routing Machine (Using roads for year 2022).",
     "statement": "The median drive time to the five closest day cares to {features.name} is {value}.",
+    "equity_category": "Availability",
     "sources": [
       {
         "name": "Virginia Department of Social Services",
